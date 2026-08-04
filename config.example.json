@@ -2,6 +2,7 @@
   "interval_secs": 60,
   "lookback_candles": 5,
   "change_threshold_pct": 0.5,
+  "bearish_change_threshold_pct": 0.5,
   "candle_interval": "1m",
   "streak_len": 5,
   "min_quote_volume_24h": 100000000,

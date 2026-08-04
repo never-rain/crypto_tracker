@@ -59,13 +59,14 @@ fn candle_interval_secs(interval: &str) -> Result<u64, Box<dyn std::error::Error
 
 fn log_config(config: &Config, source: &str) {
     println!(
-        "{}: Loaded config from {} -> min_quote_volume_24h={}, interval_secs={}, lookback_candles={}, change_threshold_pct={}, candle_interval={}, streak_len={}, listing_poll_secs={}, fresh_listing_candle_interval={}, fresh_listing_ttl_mins={}",
+        "{}: Loaded config from {} -> min_quote_volume_24h={}, interval_secs={}, lookback_candles={}, change_threshold_pct={}, bearish_change_threshold_pct={}, candle_interval={}, streak_len={}, listing_poll_secs={}, fresh_listing_candle_interval={}, fresh_listing_ttl_mins={}",
         format_timestamp_short(Local::now()),
         source,
         config.min_quote_volume_24h,
         config.interval_secs,
         config.lookback_candles,
         config.change_threshold_pct,
+        config.bearish_change_threshold_pct,
         config.candle_interval,
         config.streak_len,
         config.listing_poll_secs,
@@ -213,6 +214,49 @@ fn find_matching_window(
     None
 }
 
+fn find_bearish_matching_window(
+    closes: &VecDeque<f64>,
+    streak_len: usize,
+    threshold: f64,
+) -> Option<Vec<String>> {
+    let values: Vec<f64> = closes.iter().copied().collect();
+    for change_window in values.windows(streak_len + 1) {
+        let mut change_parts: Vec<String> = Vec::with_capacity(streak_len);
+        let mut window_ok = true;
+
+        for pair in change_window.windows(2) {
+            let prev = pair[0];
+            let last = pair[1];
+            if prev <= 0.0 {
+                window_ok = false;
+                break;
+            }
+            let change_pct = (last - prev) / prev * 100.0;
+            if change_pct > -threshold {
+                window_ok = false;
+                break;
+            }
+            change_parts.push(format!("{:.2}%", change_pct));
+        }
+
+        if window_ok {
+            return Some(change_parts);
+        }
+    }
+
+    None
+}
+
+fn should_send_alert(
+    alert_active_by_symbol: &mut HashMap<String, bool>,
+    symbol: &str,
+    is_match: bool,
+) -> bool {
+    let was_active = alert_active_by_symbol.get(symbol).copied().unwrap_or(false);
+    alert_active_by_symbol.insert(symbol.to_string(), is_match);
+    is_match && !was_active
+}
+
 fn send_momentum_alert(
     client: &reqwest::blocking::Client,
     config: &Config,
@@ -226,7 +270,10 @@ fn send_momentum_alert(
     let changes = change_parts.join(" > ");
     let config_info = format!(
         "Refresh: {}s\nLookback: {} candles\nThreshold: {:.2}%\nCandle Length: {}",
-        config.interval_secs, config.lookback_candles, config.change_threshold_pct, config.candle_interval
+        config.interval_secs,
+        config.lookback_candles,
+        config.change_threshold_pct,
+        config.candle_interval
     );
     let message = format!(
         "{}\n\n*{}*\n{}\n\n{}\n{}",
@@ -244,6 +291,46 @@ fn send_momentum_alert(
     )?;
     println!(
         "{}: Telegram momentum message sent for {}",
+        format_timestamp_short(Local::now()),
+        symbol
+    );
+    Ok(())
+}
+
+fn send_bearish_momentum_alert(
+    client: &reqwest::blocking::Client,
+    config: &Config,
+    symbol: &str,
+    change_parts: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let request_ts = format_timestamp_de(Local::now());
+    let base = symbol.strip_suffix("USDT").unwrap_or(symbol);
+    let trade_url = format!("https://www.binance.com/de/trade/{}_USDT", base);
+    let pair = format!("{}/USDT", base);
+    let changes = change_parts.join(" > ");
+    let config_info = format!(
+        "Bearish Momentum\nRefresh: {}s\nLookback: {} candles\nThreshold: -{:.2}%\nCandle Length: {}",
+        config.interval_secs,
+        config.lookback_candles,
+        config.bearish_change_threshold_pct,
+        config.candle_interval
+    );
+    let message = format!(
+        "{}\n\n*{}*\n{}\n\n{}\n{}",
+        escape_markdown_v2(&request_ts),
+        escape_markdown_v2(&pair),
+        escape_markdown_v2(&changes),
+        escape_markdown_v2(&config_info),
+        escape_markdown_v2(&trade_url)
+    );
+    send_telegram_message(
+        client,
+        &config.telegram_token,
+        &config.telegram_chat_id,
+        &message,
+    )?;
+    println!(
+        "{}: Telegram bearish momentum message sent for {}",
         format_timestamp_short(Local::now()),
         symbol
     );
@@ -470,6 +557,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = reqwest::blocking::Client::new();
     let mut alert_active_by_symbol: HashMap<String, bool> = HashMap::new();
+    let mut bearish_alert_active_by_symbol: HashMap<String, bool> = HashMap::new();
     let mut known_trading_symbols: HashSet<String> = HashSet::new();
     let mut fresh_listings: HashMap<String, FreshListingState> = HashMap::new();
 
@@ -523,14 +611,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
 
         for symbol in &universe.tracked_symbols {
-            let is_match = closes_by_symbol.get(symbol).and_then(|closes| {
+            let bullish_match = closes_by_symbol.get(symbol).and_then(|closes| {
                 find_matching_window(closes, config.streak_len, config.change_threshold_pct)
             });
-            let was_active = alert_active_by_symbol.get(symbol).copied().unwrap_or(false);
+            let bearish_match = closes_by_symbol.get(symbol).and_then(|closes| {
+                find_bearish_matching_window(
+                    closes,
+                    config.streak_len,
+                    config.bearish_change_threshold_pct,
+                )
+            });
 
-            match is_match {
+            match bullish_match {
                 Some(change_parts) => {
-                    if !was_active {
+                    if should_send_alert(&mut alert_active_by_symbol, symbol, true) {
                         println!(
                             "{}: {} matched immediately after seeding",
                             format_timestamp_short(Local::now()),
@@ -538,14 +632,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                         send_momentum_alert(&client, &config, symbol, &change_parts)?;
                     }
-                    alert_active_by_symbol.insert(symbol.clone(), true);
                 }
                 None => {
-                    alert_active_by_symbol.insert(symbol.clone(), false);
+                    should_send_alert(&mut alert_active_by_symbol, symbol, false);
+                }
+            }
+
+            match bearish_match {
+                Some(change_parts) => {
+                    if should_send_alert(&mut bearish_alert_active_by_symbol, symbol, true) {
+                        println!(
+                            "{}: {} matched bearish trend immediately after seeding",
+                            format_timestamp_short(Local::now()),
+                            symbol
+                        );
+                        send_bearish_momentum_alert(&client, &config, symbol, &change_parts)?;
+                    }
+                }
+                None => {
+                    should_send_alert(&mut bearish_alert_active_by_symbol, symbol, false);
                 }
             }
         }
         alert_active_by_symbol.retain(|symbol, _| tracked_symbol_set.contains(symbol));
+        bearish_alert_active_by_symbol.retain(|symbol, _| tracked_symbol_set.contains(symbol));
 
         let mut sockets = Vec::new();
         for batch in universe.tracked_symbols.chunks(WS_BATCH_SIZE) {
@@ -655,21 +765,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
 
-                let is_match =
+                let bullish_match =
                     find_matching_window(closes, config.streak_len, config.change_threshold_pct);
-                let was_active = alert_active_by_symbol
-                    .get(&symbol)
-                    .copied()
-                    .unwrap_or(false);
-                match is_match {
+                let bearish_match = find_bearish_matching_window(
+                    closes,
+                    config.streak_len,
+                    config.bearish_change_threshold_pct,
+                );
+
+                match bullish_match {
                     Some(change_parts) => {
-                        if !was_active {
+                        if should_send_alert(&mut alert_active_by_symbol, &symbol, true) {
                             send_momentum_alert(&client, &config, &symbol, &change_parts)?;
                         }
-                        alert_active_by_symbol.insert(symbol, true);
                     }
                     None => {
-                        alert_active_by_symbol.insert(symbol, false);
+                        should_send_alert(&mut alert_active_by_symbol, &symbol, false);
+                    }
+                }
+
+                match bearish_match {
+                    Some(change_parts) => {
+                        if should_send_alert(&mut bearish_alert_active_by_symbol, &symbol, true) {
+                            send_bearish_momentum_alert(&client, &config, &symbol, &change_parts)?;
+                        }
+                    }
+                    None => {
+                        should_send_alert(&mut bearish_alert_active_by_symbol, &symbol, false);
                     }
                 }
             }
@@ -679,5 +801,70 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "{}: Refresh window ended, reconnecting WebSocket",
             format_timestamp_short(Local::now())
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_bearish_matching_window, find_matching_window, should_send_alert};
+    use std::collections::{HashMap, VecDeque};
+
+    fn closes(values: &[f64]) -> VecDeque<f64> {
+        values.iter().copied().collect()
+    }
+
+    #[test]
+    fn bullish_matching_window_still_matches_rising_sequence() {
+        let result = find_matching_window(&closes(&[100.0, 101.0, 102.5]), 2, 0.5);
+        assert_eq!(result, Some(vec!["1.00%".to_string(), "1.49%".to_string()]));
+    }
+
+    #[test]
+    fn bearish_matching_window_matches_falling_sequence() {
+        let result = find_bearish_matching_window(&closes(&[100.0, 99.0, 98.0]), 2, 0.5);
+        assert_eq!(
+            result,
+            Some(vec!["-1.00%".to_string(), "-1.01%".to_string()])
+        );
+    }
+
+    #[test]
+    fn bearish_matching_window_rejects_mixed_sequence() {
+        let result = find_bearish_matching_window(&closes(&[100.0, 99.0, 99.5]), 2, 0.5);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn bearish_matching_window_rejects_weak_or_flat_sequence() {
+        let result = find_bearish_matching_window(&closes(&[100.0, 99.7, 99.5]), 2, 0.5);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn bearish_matching_window_rejects_non_positive_previous_close() {
+        let result = find_bearish_matching_window(&closes(&[0.0, -1.0, -2.0]), 2, 0.5);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn alert_state_allows_independent_bullish_and_bearish_tracking() {
+        let mut bullish = HashMap::new();
+        let mut bearish = HashMap::new();
+
+        assert!(should_send_alert(&mut bullish, "BTCUSDT", true));
+        assert!(!should_send_alert(&mut bullish, "BTCUSDT", true));
+        assert!(!should_send_alert(&mut bearish, "BTCUSDT", false));
+        assert!(should_send_alert(&mut bearish, "BTCUSDT", true));
+        assert!(!should_send_alert(&mut bearish, "BTCUSDT", true));
+    }
+
+    #[test]
+    fn alert_state_resets_when_direction_changes() {
+        let mut bullish = HashMap::new();
+        let mut bearish = HashMap::new();
+
+        assert!(should_send_alert(&mut bullish, "ETHUSDT", true));
+        assert!(!should_send_alert(&mut bullish, "ETHUSDT", false));
+        assert!(should_send_alert(&mut bearish, "ETHUSDT", true));
     }
 }
