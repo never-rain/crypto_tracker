@@ -7,6 +7,7 @@ pub struct Config {
     pub interval_secs: u64,
     pub lookback_candles: usize,
     pub change_threshold_pct: f64,
+    pub bearish_change_threshold_pct: f64,
     pub candle_interval: String,
     pub streak_len: usize,
     pub min_quote_volume_24h: f64,
@@ -23,6 +24,7 @@ impl Default for Config {
             interval_secs: 60,
             lookback_candles: 5,
             change_threshold_pct: 0.5,
+            bearish_change_threshold_pct: 0.5,
             candle_interval: "1m".to_string(),
             streak_len: 5,
             min_quote_volume_24h: 100_000_000.0,
@@ -68,6 +70,12 @@ pub fn parse_config() -> Result<(Config, bool), Box<dyn std::error::Error>> {
                 let value = args.next().ok_or("missing value for --change-pct")?;
                 config.change_threshold_pct = value.parse()?;
             }
+            "--bearish-change-pct" => {
+                let value = args
+                    .next()
+                    .ok_or("missing value for --bearish-change-pct")?;
+                config.bearish_change_threshold_pct = value.parse()?;
+            }
             "--candle-interval" => {
                 let value = args.next().ok_or("missing value for --candle-interval")?;
                 config.candle_interval = value;
@@ -111,10 +119,10 @@ pub fn parse_config() -> Result<(Config, bool), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: crypto_tracker [--interval-secs N] [--lookback-candles N] [--change-pct P] [--candle-interval I] [--streak-len N] [--min-quote-volume-24h V] [--listing-poll-secs N] [--fresh-listing-candle-interval I] [--fresh-listing-ttl-mins N] [--telegram-token T] [--telegram-chat-id ID] [--save-config]"
+                    "Usage: crypto_tracker [--interval-secs N] [--lookback-candles N] [--change-pct P] [--bearish-change-pct P] [--candle-interval I] [--streak-len N] [--min-quote-volume-24h V] [--listing-poll-secs N] [--fresh-listing-candle-interval I] [--fresh-listing-ttl-mins N] [--telegram-token T] [--telegram-chat-id ID] [--save-config]"
                 );
                 println!(
-                    "Defaults: --interval-secs 60, --lookback-candles 5, --change-pct 0.5, --candle-interval 1m, --streak-len 5, --min-quote-volume-24h 100000000, --listing-poll-secs 10, --fresh-listing-candle-interval 1m, --fresh-listing-ttl-mins 180"
+                    "Defaults: --interval-secs 60, --lookback-candles 5, --change-pct 0.5, --bearish-change-pct 0.5, --candle-interval 1m, --streak-len 5, --min-quote-volume-24h 100000000, --listing-poll-secs 10, --fresh-listing-candle-interval 1m, --fresh-listing-ttl-mins 180"
                 );
                 println!("Telegram: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID or pass flags.");
                 println!("Config: saved/loaded from ~/.crypto_tracker/config.json");
