@@ -1,13 +1,14 @@
 {
-  "interval_secs": 60,
-  "lookback_candles": 5,
-  "change_threshold_pct": 0.5,
-  "candle_interval": "1m",
-  "streak_len": 5,
+  "rolling_window": "30d",
+  "candle_interval": "1h",
+  "sideways_band_pct": 2.0,
+  "min_sideways_closes_pct": 95.0,
+  "positive_spike_pct": 5.0,
+  "post_spike_quiet_period": "3d",
   "min_quote_volume_24h": 100000000,
-  "listing_poll_secs": 10,
-  "fresh_listing_candle_interval": "1m",
-  "fresh_listing_ttl_mins": 180,
+  "max_quote_volume_24h": 1000000000,
+  "symbol_refresh_secs": 900,
   "telegram_token": "YOUR_BOT_TOKEN",
-  "telegram_chat_id": "YOUR_CHAT_ID"
+  "telegram_chat_id": "YOUR_CHAT_ID",
+  "healthcheck_url": "https://example.com/healthcheck"
 }
