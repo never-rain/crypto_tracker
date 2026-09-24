@@ -1,6 +1,6 @@
 [package]
 name = "crypto_tracker"
-version = "1.6.1"
+version = "2.2.0"
 edition = "2024"
 
 [dependencies]
